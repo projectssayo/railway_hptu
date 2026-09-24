@@ -2,6 +2,7 @@ import json
 import asyncio
 import sys
 import os
+import time
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from playwright.async_api import async_playwright
@@ -36,6 +37,62 @@ BLOCKED_HOSTS = ("google-analytics", "googletagmanager", "doubleclick", "googles
                  "facebook", "adservice", "hotjar", "clarity.ms")
 
 app = FastAPI()
+
+# ---------------------------------------------------------------------------
+# DEBUG helpers (4th sem) — set HPTU_DEBUG=0 in Railway variables to silence
+# ---------------------------------------------------------------------------
+HPTU_DEBUG = os.getenv("HPTU_DEBUG", "1") == "1"
+
+
+def dbg(roll, msg):
+    if HPTU_DEBUG:
+        print(f"[HPTU4][{roll}] {time.strftime('%H:%M:%S')} {msg}", flush=True)
+
+
+def mem_info():
+    """Container memory (cgroup v2/v1) + host MemAvailable, in MB. Helps spot OOM crashes."""
+    out = []
+    for used_p, max_p in (("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+                          ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes")):
+        try:
+            used = int(open(used_p).read().strip()) / 1048576
+            mx = open(max_p).read().strip()
+            mx = "unlimited" if mx == "max" else f"{int(mx) / 1048576:.0f}MB"
+            out.append(f"container={used:.0f}MB/{mx}")
+            break
+        except Exception:
+            continue
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable"):
+                out.append(f"host_avail={int(line.split()[1]) / 1024:.0f}MB")
+                break
+    except Exception:
+        pass
+    try:
+        shm = os.statvfs("/dev/shm")
+        out.append(f"/dev/shm_free={shm.f_bavail * shm.f_frsize / 1048576:.0f}MB")
+    except Exception:
+        pass
+    return " ".join(out) or "n/a"
+
+
+def attach_debug_listeners(page, roll_ref):
+    """Log crashes, JS errors, failed requests, and the main document response. Once per page."""
+    if getattr(page, "_hptu_dbg", False):
+        return
+    page._hptu_dbg = True
+
+    page.on("crash", lambda: dbg(roll_ref[0], f"!!! PAGE CRASH EVENT | {mem_info()}"))
+    page.on("pageerror", lambda e: dbg(roll_ref[0], f"pageerror: {str(e)[:200]}"))
+    page.on("console", lambda m: dbg(roll_ref[0], f"console.{m.type}: {m.text[:200]}") if m.type == "error" else None)
+    page.on("requestfailed", lambda r: dbg(
+        roll_ref[0], f"requestfailed: {r.resource_type} {r.url[:110]} -> {r.failure}")
+        if "abort" not in str(r.failure).lower() else None)   # ignore our own blocked requests
+    page.on("response", lambda r: dbg(roll_ref[0], f"doc response {r.status} {r.url[:110]}")
+            if r.request.resource_type == "document" else None)
+    page.on("close", lambda: dbg(roll_ref[0], "page closed"))
+
 
 
 async def _route_filter(route):
@@ -142,18 +199,32 @@ async def data_extraction(page, roll):
 # ---------------------------------------------------------------------------
 # NEW extraction logic (4th semester)
 # ---------------------------------------------------------------------------
+_dbg_roll = [""]   # current roll, read by the page listeners
+
+
 async def _data_extraction_4th_sem(page, roll):
+    t0 = time.perf_counter()
+    _dbg_roll[0] = roll
+    attach_debug_listeners(page, _dbg_roll)
+    dbg(roll, f"START | {mem_info()}")
     # domcontentloaded: don't wait for every ad/tracker/image to finish (that is what
     # was blowing up memory on Railway while "load" waited on them)
-    await page.goto(sem_4_home, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    dbg(roll, f"goto -> {sem_4_home[:70]}")
+    resp = await page.goto(sem_4_home, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    dbg(roll, f"goto done status={resp.status if resp else None} url={page.url[:90]} "
+              f"({time.perf_counter() - t0:.1f}s) | {mem_info()}")
 
     roll_input = page.locator("#RollNo")
+    dbg(roll, "waiting for #RollNo")
     await roll_input.wait_for(state="visible", timeout=15000)
+    dbg(roll, f"#RollNo visible ({time.perf_counter() - t0:.1f}s), filling + Enter")
     await roll_input.fill(str(roll))
     await roll_input.press("Enter")
+    dbg(roll, "Enter pressed, waiting for result table")
 
     # wait for the result table itself instead of a URL change (works for postbacks too)
     await page.locator("#midd_part_UN td.personal").first.wait_for(state="visible", timeout=20000)
+    dbg(roll, f"result table visible ({time.perf_counter() - t0:.1f}s) url={page.url[:90]} | {mem_info()}")
 
     info = await page.evaluate("""() => {
         var child_count = document.getElementById('midd_part_UN').children[0].children[0].children.length;
@@ -168,6 +239,8 @@ async def _data_extraction_4th_sem(page, roll):
         a['father_name'] = father_name;
         return a;
     }""")
+
+    dbg(roll, f"info extracted: {info}")
 
     marks = await page.evaluate("""() => {
         var x = [];
@@ -187,6 +260,8 @@ async def _data_extraction_4th_sem(page, roll):
         return x;
     }""")
 
+    dbg(roll, f"marks extracted: {len(marks)} subjects")
+
     result = await page.evaluate("""() => {
         var child_count = document.getElementById('midd_part_UN').children[0].children[0].children.length;
         var main_content = document.getElementById('midd_part_UN').children[0].children[0].children[child_count-1];
@@ -200,6 +275,7 @@ async def _data_extraction_4th_sem(page, roll):
         return arr;
     }""")
 
+    dbg(roll, f"result extracted: {result} | DONE in {time.perf_counter() - t0:.1f}s | {mem_info()}")
     return {"roll": roll, "personal_info": info, "marks": marks, "result": result}
 
 
@@ -208,6 +284,7 @@ async def data_extraction_4th_sem(page, roll):
     try:
         return await _data_extraction_4th_sem(page, roll)
     except Exception as e:
+        dbg(roll, f"FAILED: {type(e).__name__}: {str(e).splitlines()[0][:200]} | {mem_info()}")
         if _is_crash(e):
             raise
         try:
@@ -215,6 +292,7 @@ async def data_extraction_4th_sem(page, roll):
             body = await page.evaluate(
                 "document.body ? document.body.innerText.slice(0, 250).replace(/\\s+/g, ' ') : ''")
             extra = f" | url={page.url!r} | title={title!r} | body={body!r}"
+            dbg(roll, f"page state at failure:{extra}")
         except Exception:
             extra = ""
         raise RuntimeError(f"{type(e).__name__}: {str(e).splitlines()[0]}{extra}")
@@ -231,6 +309,7 @@ def _is_crash(err: Exception) -> bool:
 async def stream_results(rolls, extractor):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
+        dbg("-", f"browser launched v{browser.version} BLOCK_HEAVY={BLOCK_HEAVY} rolls={len(rolls)} | {mem_info()}")
         context, page = await new_page(browser)
 
         try:
@@ -311,9 +390,9 @@ def health():
 @app.get("/info")
 def info():
     return {
-        "old_sem": "https://railwayhptu-production.up.railway.app/results/stream?rolls=[240603010065,240603010066]",
-        "4th_sem": "https://railwayhptu-production.up.railway.app/results/4th-sem/stream?rolls=[240603010065,240603010066]",
-        "unified_example": "https://railwayhptu-production.up.railway.app/results/4/stream?rolls=[240603010065,240603010066]",
+        "old_sem": "http://localhost:8000/results/stream?rolls=[240603010065,240603010066]",
+        "4th_sem": "http://localhost:8000/results/4th-sem/stream?rolls=[240603010065,240603010066]",
+        "unified_example": "http://localhost:8000/results/4/stream?rolls=[240603010065,240603010066]",
     }
 
 
