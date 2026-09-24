@@ -390,9 +390,9 @@ def health():
 @app.get("/info")
 def info():
     return {
-        "old_sem": "http://localhost:8000/results/stream?rolls=[240603010065,240603010066]",
-        "4th_sem": "http://localhost:8000/results/4th-sem/stream?rolls=[240603010065,240603010066]",
-        "unified_example": "http://localhost:8000/results/4/stream?rolls=[240603010065,240603010066]",
+        "old_sem": "https://railwayhptu-production.up.railway.app/results/stream?rolls=[240603010065,240603010066]",
+        "4th_sem": "https://railwayhptu-production.up.railway.app/results/4th-sem/stream?rolls=[240603010065,240603010066]",
+        "unified_example": "https://railwayhptu-production.up.railway.app/results/4/stream?rolls=[240603010065,240603010066]",
     }
 
 
