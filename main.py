@@ -1,6 +1,7 @@
 import json
 import asyncio
 import sys
+import os
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from playwright.async_api import async_playwright
@@ -28,6 +29,8 @@ CHROMIUM_ARGS = [
     "--no-first-run",
 ]
 NAV_TIMEOUT_MS = 45000
+# set BLOCK_HEAVY=0 in Railway variables to turn resource blocking off (for debugging)
+BLOCK_HEAVY = os.getenv("BLOCK_HEAVY", "1") == "1"
 BLOCKED_TYPES = {"image", "media", "font"}
 BLOCKED_HOSTS = ("google-analytics", "googletagmanager", "doubleclick", "googlesyndication",
                  "facebook", "adservice", "hotjar", "clarity.ms")
@@ -52,7 +55,8 @@ async def new_page(browser):
         locale="en-IN",
         timezone_id="Asia/Kolkata",
     )
-    await context.route("**/*", _route_filter)
+    if BLOCK_HEAVY:
+        await context.route("**/*", _route_filter)
     page = await context.new_page()
     page.set_default_timeout(NAV_TIMEOUT_MS)
     return context, page
@@ -138,7 +142,7 @@ async def data_extraction(page, roll):
 # ---------------------------------------------------------------------------
 # NEW extraction logic (4th semester)
 # ---------------------------------------------------------------------------
-async def data_extraction_4th_sem(page, roll):
+async def _data_extraction_4th_sem(page, roll):
     # domcontentloaded: don't wait for every ad/tracker/image to finish (that is what
     # was blowing up memory on Railway while "load" waited on them)
     await page.goto(sem_4_home, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -197,6 +201,23 @@ async def data_extraction_4th_sem(page, roll):
     }""")
 
     return {"roll": roll, "personal_info": info, "marks": marks, "result": result}
+
+
+async def data_extraction_4th_sem(page, roll):
+    """Wrapper: on failure, say WHAT the page actually showed (block page, captcha, error...)."""
+    try:
+        return await _data_extraction_4th_sem(page, roll)
+    except Exception as e:
+        if _is_crash(e):
+            raise
+        try:
+            title = await page.title()
+            body = await page.evaluate(
+                "document.body ? document.body.innerText.slice(0, 250).replace(/\\s+/g, ' ') : ''")
+            extra = f" | url={page.url!r} | title={title!r} | body={body!r}"
+        except Exception:
+            extra = ""
+        raise RuntimeError(f"{type(e).__name__}: {str(e).splitlines()[0]}{extra}")
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +311,9 @@ def health():
 @app.get("/info")
 def info():
     return {
-        "old_sem": "http://localhost:8000/results/stream?rolls=[240603010065,240603010066]",
-        "4th_sem": "http://localhost:8000/results/4th-sem/stream?rolls=[240603010065,240603010066]",
-        "unified_example": "http://localhost:8000/results/4/stream?rolls=[240603010065,240603010066]",
+        "old_sem": "https://railwayhptu-production.up.railway.app/results/stream?rolls=[240603010065,240603010066]",
+        "4th_sem": "https://railwayhptu-production.up.railway.app/results/4th-sem/stream?rolls=[240603010065,240603010066]",
+        "unified_example": "https://railwayhptu-production.up.railway.app/results/4/stream?rolls=[240603010065,240603010066]",
     }
 
 
