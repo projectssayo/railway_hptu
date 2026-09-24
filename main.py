@@ -22,11 +22,11 @@ async def data_extraction(page, roll):
     await page.goto(home)
 
     roll_input = page.locator("input[placeholder='ROLL NO']")
-    await roll_input.wait_for(state="visible", timeout=8000)
+    await roll_input.wait_for(state="visible", timeout=5000)
     await roll_input.fill(str(roll))
     await roll_input.press("Enter")
 
-    await page.wait_for_url(lambda url: url != home, timeout=10000)
+    await page.wait_for_url(lambda url: url != home, timeout=8000)
 
     info = await page.evaluate("""() => {
         let a = {};
@@ -110,11 +110,11 @@ async def data_extraction_4th_sem(page, roll):
     await page.goto(sem_4_home)
 
     roll_input = page.locator("#RollNo")
-    await roll_input.wait_for(state="visible", timeout=8000)
+    await roll_input.wait_for(state="visible", timeout=5000)
     await roll_input.fill(str(roll))
     await roll_input.press("Enter")
 
-    await page.locator("#midd_part_UN td.personal").first.wait_for(state="visible", timeout=10000)
+    await page.locator("#midd_part_UN td.personal").first.wait_for(state="visible", timeout=5000)
 
     info = await page.evaluate("""() => {
         var child_count = document.getElementById('midd_part_UN').children[0].children[0].children.length;
